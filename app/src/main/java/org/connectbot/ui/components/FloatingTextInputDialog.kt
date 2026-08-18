@@ -158,6 +158,13 @@ private const val DEFAULT_HEIGHT_RATIO = 0.25f
 private const val MIN_WIDTH_DP = 200f
 private const val MIN_HEIGHT_DP = 80f
 
+/**
+ * Tint of the stop button while dictating. A recording indicator is red whatever the theme, and
+ * the header behind it is the theme's primary color, so colorScheme.error cannot be counted on
+ * to stand out there: the dark scheme's error is a pale pink that washes out against it.
+ */
+private val RECORDING_TINT = Color(0xFFD32F2F)
+
 /** How far the microphone icon grows at full volume, so it visibly reacts while listening. */
 private const val MIC_PULSE_RANGE = 0.4f
 
@@ -399,7 +406,7 @@ fun FloatingTextInputDialog(
                                     },
                                 ),
                                 tint = if (voice.isListening) {
-                                    MaterialTheme.colorScheme.error
+                                    RECORDING_TINT
                                 } else {
                                     MaterialTheme.colorScheme.onPrimary
                                 },
