@@ -998,6 +998,9 @@
 	<!-- Label for the text field in the floating text input dialog where users compose their text -->
 	<string name="terminal_text_input_dialog_label">Enter text to send to terminal</string>
 
+	<!-- Content description for the send button in the floating text input dialog, which submits the composed line as if Enter had been pressed -->
+	<string name="terminal_text_input_send_enter">Send and press Enter</string>
+
 	<!-- Content description for the microphone button in the floating text input dialog, shown when dictation is idle -->
 	<string name="terminal_text_input_voice_input">Voice input</string>
 

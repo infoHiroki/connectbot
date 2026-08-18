@@ -85,6 +85,12 @@ import org.connectbot.R
 import org.connectbot.service.TerminalBridge
 import kotlin.math.roundToInt
 
+/**
+ * What the Enter key puts on the wire. Appending it means one tap submits the composed line
+ * rather than parking it at the prompt for a second trip through the terminal keyboard.
+ */
+private const val ENTER = "\r"
+
 private const val NEWLINE_SYMBOL = "↩"
 private const val TAB_SYMBOL = "⇥"
 
@@ -200,6 +206,7 @@ private fun Char.isWrittenWithoutSpaces(): Boolean = when (Character.UnicodeScri
  * - Draggable window that can be positioned anywhere
  * - Full IME support with swipe typing, voice input, predictions
  * - Microphone button that dictates into the field in place, showing partial results
+ * - Sending submits the line, appending the carriage return the Enter key would send
  * - Persistent positioning saved in SharedPreferences
  * - Material Design 3 styling with blue accent
  * - Full text selection support
@@ -317,7 +324,7 @@ fun FloatingTextInputDialog(
         voice.cancel()
         dictationStart = null
         if (text.isNotEmpty()) {
-            bridge.injectString(text)
+            bridge.injectString(text + ENTER)
             text = ""
         }
     }
@@ -479,7 +486,9 @@ fun FloatingTextInputDialog(
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Filled.Send,
-                                contentDescription = stringResource(R.string.button_send),
+                                contentDescription = stringResource(
+                                    R.string.terminal_text_input_send_enter,
+                                ),
                                 tint = MaterialTheme.colorScheme.primary,
                             )
                         }
