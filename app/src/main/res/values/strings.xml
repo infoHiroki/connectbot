@@ -998,6 +998,12 @@
 	<!-- Label for the text field in the floating text input dialog where users compose their text -->
 	<string name="terminal_text_input_dialog_label">Enter text to send to terminal</string>
 
+	<!-- Content description for the microphone button in the floating text input dialog; also shown as the prompt in the system speech recognizer -->
+	<string name="terminal_text_input_voice_input">Voice input</string>
+
+	<!-- Toast shown when the device has no speech recognition app available to handle voice input -->
+	<string name="terminal_text_input_voice_input_unavailable">Voice input is not available on this device</string>
+
 	<!-- Content description for the resize handle in the floating text input dialog -->
 	<string name="terminal_text_input_resize_handle">Resize</string>
 

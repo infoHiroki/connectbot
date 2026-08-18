@@ -17,6 +17,14 @@
 
 package org.connectbot.ui.components
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +44,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -74,6 +83,7 @@ import androidx.core.content.edit
 import androidx.preference.PreferenceManager
 import org.connectbot.R
 import org.connectbot.service.TerminalBridge
+import timber.log.Timber
 import kotlin.math.roundToInt
 
 private const val NEWLINE_SYMBOL = "↩"
@@ -134,6 +144,7 @@ private const val MIN_HEIGHT_DP = 80f
  * Features:
  * - Draggable window that can be positioned anywhere
  * - Full IME support with swipe typing, voice input, predictions
+ * - Microphone button that dictates straight into the field via the system recognizer
  * - Persistent positioning saved in SharedPreferences
  * - Material Design 3 styling with blue accent
  * - Full text selection support
@@ -185,6 +196,47 @@ fun FloatingTextInputDialog(
                 putFloat(PREF_FLOATING_INPUT_WIDTH, windowWidthPx / screenWidthPx)
                 putFloat(PREF_FLOATING_INPUT_HEIGHT, windowHeightPx / screenHeightPx)
             }
+        }
+    }
+
+    // Dictation goes into the text field rather than straight to the terminal so that
+    // misrecognized commands can be reviewed and edited before they are sent.
+    val speechAvailable = remember { SpeechRecognizer.isRecognitionAvailable(context) }
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.takeIf { it.isNotEmpty() }
+            if (spoken != null) {
+                text = if (text.isEmpty()) spoken else "$text $spoken"
+            }
+        }
+    }
+
+    // Voice input helper function
+    fun startVoiceInput() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_PROMPT,
+                context.getString(R.string.terminal_text_input_voice_input),
+            )
+        }
+        try {
+            speechLauncher.launch(intent)
+        } catch (e: ActivityNotFoundException) {
+            Timber.w(e, "No activity available to handle speech recognition")
+            Toast.makeText(
+                context,
+                R.string.terminal_text_input_voice_input_unavailable,
+                Toast.LENGTH_SHORT,
+            ).show()
         }
     }
 
@@ -249,6 +301,24 @@ fun FloatingTextInputDialog(
                         color = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.weight(1f),
                     )
+
+                    if (speechAvailable) {
+                        IconButton(
+                            onClick = { startVoiceInput() },
+                            modifier = Modifier
+                                .padding(end = 12.dp)
+                                .size(24.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Mic,
+                                contentDescription = stringResource(
+                                    R.string.terminal_text_input_voice_input,
+                                ),
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
 
                     IconButton(
                         onClick = onDismiss,
