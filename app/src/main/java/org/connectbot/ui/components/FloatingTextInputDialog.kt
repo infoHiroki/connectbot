@@ -43,6 +43,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.OpenInFull
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -164,6 +165,29 @@ private const val MIC_PULSE_RANGE = 0.4f
 private const val DICTATION_ALPHA = 0.6f
 
 /**
+ * Appends the separator that should precede the next dictated segment. Japanese and the other
+ * scripts written without spaces would collect stray gaps between utterances, so a space is
+ * only added where the preceding character comes from a script that uses them.
+ */
+private fun String.withSegmentSeparator(): String = when {
+    isEmpty() -> this
+    last().isWhitespace() -> this
+    last().isWrittenWithoutSpaces() -> this
+    else -> "$this "
+}
+
+private fun Char.isWrittenWithoutSpaces(): Boolean = when (Character.UnicodeScript.of(code)) {
+    Character.UnicodeScript.HAN,
+    Character.UnicodeScript.HIRAGANA,
+    Character.UnicodeScript.KATAKANA,
+    Character.UnicodeScript.HANGUL,
+    Character.UnicodeScript.THAI,
+    -> true
+
+    else -> false
+}
+
+/**
  * Floating, draggable text input dialog with Compose TextField for full IME support.
  * Features:
  * - Draggable window that can be positioned anywhere
@@ -233,20 +257,25 @@ fun FloatingTextInputDialog(
         onPartialResult = { spoken ->
             dictationStart?.let { start -> text = text.take(start) + spoken }
         },
-        onFinalResult = { spoken ->
-            dictationStart?.let { start -> text = text.take(start) + spoken }
-            dictationStart = null
+        onSegmentResult = { spoken ->
+            dictationStart?.let { start ->
+                // A segment is committed but the session continues, so anchor the next one after it.
+                val committed = (text.take(start) + spoken).withSegmentSeparator()
+                text = committed
+                dictationStart = committed.length
+            }
         },
-        onFailure = { message ->
+        onSessionEnd = { message ->
+            // Whatever is past the anchor never made it to a segment; drop it.
             dictationStart?.let { start -> text = text.take(start) }
             dictationStart = null
-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            message?.let { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
         },
     )
 
     fun beginDictation() {
         // Separate a new utterance from whatever is already composed.
-        val prefix = if (text.isEmpty() || text.last().isWhitespace()) text else "$text "
+        val prefix = text.withSegmentSeparator()
         text = prefix
         dictationStart = prefix.length
         voice.start()
@@ -357,7 +386,11 @@ fun FloatingTextInputDialog(
                                 .size(24.dp),
                         ) {
                             Icon(
-                                Icons.Default.Mic,
+                                if (voice.isListening) {
+                                    Icons.Default.Stop
+                                } else {
+                                    Icons.Default.Mic
+                                },
                                 contentDescription = stringResource(
                                     if (voice.isListening) {
                                         R.string.terminal_text_input_voice_stop

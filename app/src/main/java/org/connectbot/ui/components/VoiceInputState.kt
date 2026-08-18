@@ -22,6 +22,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -42,11 +44,20 @@ import timber.log.Timber
 import java.util.Locale
 
 /**
- * Recognizers keep listening this long through a pause before deciding the utterance is over.
- * Dictating a command usually involves thinking mid-sentence, so the stock timeout is too eager.
- * Recognizers are free to ignore these hints, which is why stopping is also driven by the button.
+ * Hint asking recognizers to sit through this much silence before calling an utterance finished.
+ * Dictating a command involves thinking mid-sentence, so the stock timeout is far too eager.
+ * Recognizers are free to ignore the hint, which is why [VoiceInputState] also restarts itself.
  */
 private const val SILENCE_TIMEOUT_MS = 3000L
+
+/** Pause before listening again, long enough for the recognizer to release its audio session. */
+private const val RESTART_DELAY_MS = 150L
+
+/**
+ * How many times in a row listening may end without recognizing anything before the session is
+ * given up. Past this the user has simply stopped talking and the microphone should not stay open.
+ */
+private const val MAX_EMPTY_RESTARTS = 5
 
 /** Range of `onRmsChanged` values, in dB, that is mapped onto the 0f..1f audio level. */
 private const val RMS_FLOOR_DB = -2f
@@ -57,9 +68,14 @@ private const val RMS_SMOOTHING = 0.3f
 
 /**
  * Drives in-place dictation with [SpeechRecognizer]. Unlike launching
- * [RecognizerIntent.ACTION_RECOGNIZE_SPEECH], this keeps the caller's UI on screen, which lets
- * partial results stream into the text being composed and lets the caller decide when listening
- * stops rather than relying on the recognizer's own endpointing.
+ * [RecognizerIntent.ACTION_RECOGNIZE_SPEECH], this keeps the caller's UI on screen and streams
+ * partial results into the text being composed.
+ *
+ * A recognizer decides on its own that an utterance is over once it hears a pause, and there is no
+ * API to turn that off. So listening restarts automatically after every finalized segment: each
+ * segment is handed to `onSegmentResult` as it lands and the session keeps running until [stop] or
+ * [cancel], which is what makes a single stop button meaningful. `onSessionEnd` marks the point
+ * where nothing more is coming, and carries a message resource when the session ended badly.
  *
  * Create with [rememberVoiceInputState]; all methods must be called from the main thread.
  */
@@ -67,13 +83,13 @@ private const val RMS_SMOOTHING = 0.3f
 class VoiceInputState internal constructor(
     private val context: Context,
     private val onPartialResult: (String) -> Unit,
-    private val onFinalResult: (String) -> Unit,
-    private val onFailure: (Int) -> Unit,
+    private val onSegmentResult: (String) -> Unit,
+    private val onSessionEnd: (Int?) -> Unit,
 ) {
     /** Whether any recognition service is installed. When false there is nothing to offer. */
     val isAvailable: Boolean = SpeechRecognizer.isRecognitionAvailable(context)
 
-    /** True from the moment listening starts until a result or an error arrives. */
+    /** True for the whole dictation session, spanning the restarts between segments. */
     var isListening by mutableStateOf(false)
         private set
 
@@ -81,64 +97,117 @@ class VoiceInputState internal constructor(
     var audioLevel by mutableFloatStateOf(0f)
         private set
 
+    private val handler = Handler(Looper.getMainLooper())
     private var recognizer: SpeechRecognizer? = null
+
+    /** Set while the user still wants to dictate; cleared only by [stop], [cancel] or a failure. */
+    private var keepListening = false
+
+    /** Consecutive restarts that produced nothing, used to close an abandoned session. */
+    private var emptyRestarts = 0
+
+    /** Whether this session has recognized anything, so giving up can stay quiet if it has. */
+    private var recognizedAnything = false
+
+    private val listenAgain = Runnable {
+        if (keepListening) listen()
+    }
 
     /** Whether the microphone permission has already been granted. */
     fun hasAudioPermission(): Boolean = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
         PackageManager.PERMISSION_GRANTED
 
-    /** Starts listening. Partial results arrive continuously until [stop] or [cancel]. */
+    /**
+     * Starts a dictation session. Partial results stream continuously and each finished segment
+     * is delivered to `onSegmentResult`, until [stop] or [cancel] ends the session.
+     */
     fun start() {
         if (isListening) return
-
-        val speech = recognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
-            it.setRecognitionListener(listener)
-            recognizer = it
-        }
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
-            )
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-            putExtra(
-                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
-                SILENCE_TIMEOUT_MS,
-            )
-            putExtra(
-                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
-                SILENCE_TIMEOUT_MS,
-            )
-        }
-
+        keepListening = true
         isListening = true
+        emptyRestarts = 0
+        recognizedAnything = false
         audioLevel = 0f
-        speech.startListening(intent)
+        listen()
     }
 
-    /** Stops recording and asks the recognizer to finalize whatever it heard so far. */
+    /** Ends the session, letting the recognizer finalize whatever it heard last. */
     fun stop() {
         if (!isListening) return
+        keepListening = false
         audioLevel = 0f
+        handler.removeCallbacks(listenAgain)
         recognizer?.stopListening()
     }
 
-    /** Abandons the current utterance without waiting for a final result. */
+    /**
+     * Ends the session immediately, discarding anything not yet delivered. `onSessionEnd` is not
+     * invoked: the caller asked for this and already knows the session is over.
+     */
     fun cancel() {
         if (!isListening) return
-        isListening = false
-        audioLevel = 0f
+        endSession()
         recognizer?.cancel()
     }
 
     /** Releases the underlying recognizer. Called automatically when the composition leaves. */
     fun release() {
+        endSession()
         recognizer?.destroy()
         recognizer = null
+    }
+
+    private fun endSession() {
+        keepListening = false
         isListening = false
         audioLevel = 0f
+        handler.removeCallbacks(listenAgain)
+    }
+
+    private fun listen() {
+        val speech = recognizer ?: SpeechRecognizer.createSpeechRecognizer(context).also {
+            it.setRecognitionListener(listener)
+            recognizer = it
+        }
+
+        speech.startListening(
+            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
+                )
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+                putExtra(
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                    SILENCE_TIMEOUT_MS,
+                )
+                putExtra(
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                    SILENCE_TIMEOUT_MS,
+                )
+            },
+        )
+    }
+
+    /** Queues another listen, or closes the session once too many have come back empty. */
+    private fun listenAgainOrGiveUp() {
+        if (emptyRestarts >= MAX_EMPTY_RESTARTS) {
+            finish(R.string.terminal_text_input_voice_no_speech)
+            return
+        }
+        handler.removeCallbacks(listenAgain)
+        handler.postDelayed(listenAgain, RESTART_DELAY_MS)
+    }
+
+    /**
+     * Closes the session, reporting [message] only when nothing was recognized. Once a segment has
+     * landed, running out of speech is how dictation is meant to end, not something to complain
+     * about.
+     */
+    private fun finish(@StringRes message: Int) {
+        endSession()
+        onSessionEnd(if (recognizedAnything) null else message)
     }
 
     private val listener = object : RecognitionListener {
@@ -159,20 +228,39 @@ class VoiceInputState internal constructor(
         }
 
         override fun onError(error: Int) {
-            Timber.w("Speech recognition failed with error %d", error)
-            isListening = false
             audioLevel = 0f
-            onFailure(messageFor(error))
+            if (error.endsOnlyThisSegment()) {
+                Timber.d("Speech segment ended with error %d", error)
+                emptyRestarts++
+                if (keepListening) {
+                    listenAgainOrGiveUp()
+                } else {
+                    finish(messageFor(error))
+                }
+                return
+            }
+
+            Timber.w("Speech recognition failed with error %d", error)
+            endSession()
+            onSessionEnd(messageFor(error))
         }
 
         override fun onResults(results: Bundle?) {
-            isListening = false
             audioLevel = 0f
             val spoken = results.firstRecognition()
+
             if (spoken != null) {
-                onFinalResult(spoken)
+                emptyRestarts = 0
+                recognizedAnything = true
+                onSegmentResult(spoken)
             } else {
-                onFailure(R.string.terminal_text_input_voice_no_speech)
+                emptyRestarts++
+            }
+
+            if (keepListening) {
+                listenAgainOrGiveUp()
+            } else {
+                finish(R.string.terminal_text_input_voice_no_speech)
             }
         }
 
@@ -183,6 +271,14 @@ class VoiceInputState internal constructor(
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
     }
 }
+
+/**
+ * Whether an error only means the current segment is over. These arrive routinely whenever the
+ * speaker pauses, so they must not tear down a session the user has not stopped.
+ */
+private fun Int.endsOnlyThisSegment(): Boolean = this == SpeechRecognizer.ERROR_NO_MATCH ||
+    this == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+    this == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
 
 @StringRes
 private fun messageFor(error: Int): Int = when (error) {
@@ -209,25 +305,26 @@ private fun Bundle?.firstRecognition(): String? = this?.getStringArrayList(Speec
  * invoked with their most recent value, and the recognizer is destroyed when the composition
  * leaves so that the microphone is never held open by a dismissed dialog.
  *
- * [onFailure] receives a string resource describing why dictation ended without a result.
+ * [onSessionEnd] runs once dictation is over, with a string resource to show when it ended
+ * badly and null when it simply finished.
  */
 @Composable
 fun rememberVoiceInputState(
     onPartialResult: (String) -> Unit,
-    onFinalResult: (String) -> Unit,
-    onFailure: (Int) -> Unit,
+    onSegmentResult: (String) -> Unit,
+    onSessionEnd: (Int?) -> Unit,
 ): VoiceInputState {
     val context = LocalContext.current
     val currentPartial by rememberUpdatedState(onPartialResult)
-    val currentFinal by rememberUpdatedState(onFinalResult)
-    val currentFailure by rememberUpdatedState(onFailure)
+    val currentSegment by rememberUpdatedState(onSegmentResult)
+    val currentSessionEnd by rememberUpdatedState(onSessionEnd)
 
     val state = remember(context) {
         VoiceInputState(
             context = context,
             onPartialResult = { currentPartial(it) },
-            onFinalResult = { currentFinal(it) },
-            onFailure = { currentFailure(it) },
+            onSegmentResult = { currentSegment(it) },
+            onSessionEnd = { currentSessionEnd(it) },
         )
     }
 
