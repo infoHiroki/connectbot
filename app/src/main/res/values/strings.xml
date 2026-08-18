@@ -998,6 +998,24 @@
 	<!-- Label for the text field in the floating text input dialog where users compose their text -->
 	<string name="terminal_text_input_dialog_label">Enter text to send to terminal</string>
 
+	<!-- Content description for the microphone button in the floating text input dialog, shown when dictation is idle -->
+	<string name="terminal_text_input_voice_input">Voice input</string>
+
+	<!-- Content description for the microphone button in the floating text input dialog while it is listening; tapping it again finishes dictation -->
+	<string name="terminal_text_input_voice_stop">Stop voice input</string>
+
+	<!-- Toast shown when dictation finished without the recognizer hearing any speech -->
+	<string name="terminal_text_input_voice_no_speech">No speech was heard</string>
+
+	<!-- Toast shown when dictation failed because the speech recognizer could not reach the network -->
+	<string name="terminal_text_input_voice_network_error">Voice input needs a network connection</string>
+
+	<!-- Toast shown when the user declines the microphone permission that dictation requires -->
+	<string name="terminal_text_input_voice_permission_denied">Microphone access is needed for voice input</string>
+
+	<!-- Toast shown when dictation failed for any other reason -->
+	<string name="terminal_text_input_voice_error">Voice input failed</string>
+
 	<!-- Content description for the resize handle in the floating text input dialog -->
 	<string name="terminal_text_input_resize_handle">Resize</string>
 

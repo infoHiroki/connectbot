@@ -17,6 +17,11 @@
 
 package org.connectbot.ui.components
 
+import android.Manifest
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +41,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,6 +59,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -62,6 +69,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
@@ -79,7 +87,15 @@ import kotlin.math.roundToInt
 private const val NEWLINE_SYMBOL = "↩"
 private const val TAB_SYMBOL = "⇥"
 
-private object SpecialCharVisualTransformation : VisualTransformation {
+/**
+ * Renders newlines and tabs as visible symbols. Text from [dimmedFrom] onwards is drawn in
+ * [dimmedColor] to mark dictation that the recognizer has not finalized yet; pass null once
+ * everything in the field is committed.
+ */
+private class SpecialCharVisualTransformation(
+    private val dimmedFrom: Int?,
+    private val dimmedColor: Color,
+) : VisualTransformation {
     override fun filter(text: AnnotatedString): TransformedText {
         val original = text.text
 
@@ -114,7 +130,19 @@ private object SpecialCharVisualTransformation : VisualTransformation {
             override fun transformedToOriginal(offset: Int): Int = transformedToOriginal[offset.coerceIn(0, transformed.length)]
         }
 
-        return TransformedText(AnnotatedString(transformed), offsetMapping)
+        val styled = if (dimmedFrom != null && dimmedFrom < original.length) {
+            AnnotatedString.Builder(transformed).apply {
+                addStyle(
+                    SpanStyle(color = dimmedColor),
+                    originalToTransformed[dimmedFrom.coerceAtLeast(0)],
+                    transformed.length,
+                )
+            }.toAnnotatedString()
+        } else {
+            AnnotatedString(transformed)
+        }
+
+        return TransformedText(styled, offsetMapping)
     }
 }
 
@@ -129,11 +157,18 @@ private const val DEFAULT_HEIGHT_RATIO = 0.25f
 private const val MIN_WIDTH_DP = 200f
 private const val MIN_HEIGHT_DP = 80f
 
+/** How far the microphone icon grows at full volume, so it visibly reacts while listening. */
+private const val MIC_PULSE_RANGE = 0.4f
+
+/** Opacity of not-yet-final dictation, marking it as still subject to change. */
+private const val DICTATION_ALPHA = 0.6f
+
 /**
  * Floating, draggable text input dialog with Compose TextField for full IME support.
  * Features:
  * - Draggable window that can be positioned anywhere
  * - Full IME support with swipe typing, voice input, predictions
+ * - Microphone button that dictates into the field in place, showing partial results
  * - Persistent positioning saved in SharedPreferences
  * - Material Design 3 styling with blue accent
  * - Full text selection support
@@ -188,8 +223,63 @@ fun FloatingTextInputDialog(
         }
     }
 
+    // Offset in [text] where the running utterance begins. Everything from here to the end is
+    // still provisional: it is rendered dimmed, replaced on every partial result, and dropped if
+    // recognition fails. Dictating into the field rather than straight to the terminal means a
+    // misheard command can be corrected before it is executed.
+    var dictationStart by remember { mutableStateOf<Int?>(null) }
+
+    val voice = rememberVoiceInputState(
+        onPartialResult = { spoken ->
+            dictationStart?.let { start -> text = text.take(start) + spoken }
+        },
+        onFinalResult = { spoken ->
+            dictationStart?.let { start -> text = text.take(start) + spoken }
+            dictationStart = null
+        },
+        onFailure = { message ->
+            dictationStart?.let { start -> text = text.take(start) }
+            dictationStart = null
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        },
+    )
+
+    fun beginDictation() {
+        // Separate a new utterance from whatever is already composed.
+        val prefix = if (text.isEmpty() || text.last().isWhitespace()) text else "$text "
+        text = prefix
+        dictationStart = prefix.length
+        voice.start()
+    }
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            beginDictation()
+        } else {
+            Toast.makeText(
+                context,
+                R.string.terminal_text_input_voice_permission_denied,
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
+
+    // Voice input helper function
+    fun toggleDictation() {
+        when {
+            voice.isListening -> voice.stop()
+            voice.hasAudioPermission() -> beginDictation()
+            else -> audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     // Send text helper function
     fun sendText() {
+        // Send exactly what is on screen; a pending final result would arrive too late to matter.
+        voice.cancel()
+        dictationStart = null
         if (text.isNotEmpty()) {
             bridge.injectString(text)
             text = ""
@@ -250,6 +340,43 @@ fun FloatingTextInputDialog(
                         modifier = Modifier.weight(1f),
                     )
 
+                    if (voice.isAvailable) {
+                        val micScale by animateFloatAsState(
+                            targetValue = if (voice.isListening) {
+                                1f + voice.audioLevel * MIC_PULSE_RANGE
+                            } else {
+                                1f
+                            },
+                            label = "micPulse",
+                        )
+
+                        IconButton(
+                            onClick = { toggleDictation() },
+                            modifier = Modifier
+                                .padding(end = 12.dp)
+                                .size(24.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Mic,
+                                contentDescription = stringResource(
+                                    if (voice.isListening) {
+                                        R.string.terminal_text_input_voice_stop
+                                    } else {
+                                        R.string.terminal_text_input_voice_input
+                                    },
+                                ),
+                                tint = if (voice.isListening) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onPrimary
+                                },
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .scale(micScale),
+                            )
+                        }
+                    }
+
                     IconButton(
                         onClick = onDismiss,
                         modifier = Modifier.size(24.dp),
@@ -278,7 +405,11 @@ fun FloatingTextInputDialog(
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Text,
                         ),
-                        visualTransformation = SpecialCharVisualTransformation,
+                        visualTransformation = SpecialCharVisualTransformation(
+                            dimmedFrom = dictationStart,
+                            dimmedColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                .copy(alpha = DICTATION_ALPHA),
+                        ),
                         colors = TextFieldDefaults.colors(
                             focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
                             unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
